@@ -5,39 +5,35 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	statsURL  = "http://srv.msk01.gigacorp.local/_stats"
-	interval  = 1 * time.Second
-	timeout   = 3 * time.Second
-	maxErrors = 3
+	statsURL = "http://srv.msk01.gigacorp.local/_stats"
 
-	loadThreshold = 30.0
-	memThreshold  = 80.0
-	diskThreshold = 90.0
-	netThreshold  = 90.0
+
+	pollInterval = 100 * time.Millisecond
+	httpTimeout  = 2 * time.Second
+
+	maxConsecutiveErrors = 3
 )
 
 func main() {
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{Timeout: httpTimeout}
 
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	consecutiveErrors := 0
 
 	for {
-		ok := pollOnce(client)
-		if ok {
+		if pollOnce(client) {
 			consecutiveErrors = 0
 		} else {
 			consecutiveErrors++
-			if consecutiveErrors >= maxErrors {
+			if consecutiveErrors >= maxConsecutiveErrors {
 				fmt.Println("Unable to fetch server statistic.")
 			}
 		}
@@ -47,12 +43,7 @@ func main() {
 }
 
 func pollOnce(client *http.Client) bool {
-	req, err := http.NewRequest(http.MethodGet, statsURL, nil)
-	if err != nil {
-		return false
-	}
-
-	resp, err := client.Do(req)
+	resp, err := client.Get(statsURL)
 	if err != nil {
 		return false
 	}
@@ -67,16 +58,19 @@ func pollOnce(client *http.Client) bool {
 	if err != nil {
 		return false
 	}
+	line = strings.TrimSpace(line)
 
-	parts := strings.Split(strings.TrimSpace(line), ",")
+	parts := strings.Split(line, ",")
 	if len(parts) != 7 {
 		return false
 	}
 
-	load, err := parseFloat(parts[0])
+
+	load, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
 	if err != nil {
 		return false
 	}
+
 
 	memTotal, err := parseUint(parts[1])
 	if err != nil || memTotal == 0 {
@@ -105,35 +99,42 @@ func pollOnce(client *http.Client) bool {
 		return false
 	}
 
-	if load > loadThreshold {
+
+	if load > 30 {
 
 		fmt.Printf("Load Average is too high: %s\n", strings.TrimSpace(parts[0]))
 	}
 
-	memPct := (float64(memUsed) / float64(memTotal)) * 100.0
-	if memPct > memThreshold {
-		fmt.Printf("Memory usage too high: %d%%\n", roundToInt(memPct))
+
+	memPct := (memUsed * 100) / memTotal
+	if memPct > 80 {
+		fmt.Printf("Memory usage too high: %d%%\n", memPct)
 	}
 
-	diskPct := (float64(diskUsed) / float64(diskTotal)) * 100.0
-	if diskPct > diskThreshold {
-		freeBytes := int64(diskTotal) - int64(diskUsed)
-		if freeBytes < 0 {
+
+	diskPct := (diskUsed * 100) / diskTotal
+	if diskPct > 90 {
+		var freeBytes uint64
+		if diskUsed >= diskTotal {
 			freeBytes = 0
+		} else {
+			freeBytes = diskTotal - diskUsed
 		}
 		freeMB := freeBytes / (1024 * 1024)
 		fmt.Printf("Free disk space is too low: %d Mb left\n", freeMB)
 	}
 
-	netPct := (float64(netUsed) / float64(netCap)) * 100.0
-	if netPct > netThreshold {
-		freeBytesPerSec := int64(netCap) - int64(netUsed)
-		if freeBytesPerSec < 0 {
-			freeBytesPerSec = 0
+
+	netPct := (netUsed * 100) / netCap
+	if netPct > 90 {
+		var freeBps uint64
+		if netUsed >= netCap {
+			freeBps = 0
+		} else {
+			freeBps = netCap - netUsed
 		}
-		// Mbit/s: bytes/s * 8 / 1024 / 1024
-		freeMbit := (float64(freeBytesPerSec) * 8.0) / (1024.0 * 1024.0)
-		fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", roundToInt(freeMbit))
+		freeMbitLike := freeBps / 1_000_000
+		fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", freeMbitLike)
 	}
 
 	return true
@@ -151,17 +152,3 @@ func readSingleLine(r io.Reader) (string, error) {
 func parseUint(s string) (uint64, error) {
 	return strconv.ParseUint(strings.TrimSpace(s), 10, 64)
 }
-
-func parseFloat(s string) (float64, error) {
-	return strconv.ParseFloat(strings.TrimSpace(s), 64)
-}
-
-func roundToInt(x float64) int64 {
-	if x < 0 {
-		return int64(x - 0.5)
-	}
-	return int64(x + 0.5)
-}
-
-
-var _ = os.Stdout
